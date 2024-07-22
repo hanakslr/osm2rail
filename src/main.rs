@@ -6,7 +6,16 @@ pub struct OsmRailway {
 
     way_id: i64,
 
-    nodes: Vec<u64>, // A list of the node_ids that make up this way.
+    nodes: Vec<i64>, // A list of the node_ids that make up this way.
+}
+
+struct OsmNode {
+    // Represents a single OsmNode. Keyed by node_id - these ids correspond to the values of OsmRailway.nodes.
+    // Our library can exapnd the Way out into lat/longs directly, but it will be more efficient to split Railways into
+    // segments based on intersecting node_id than lat/long.
+    node_id: i64,
+    latitude: f64,
+    longitude: f64,
 }
 
 fn collect_all_railways() {
@@ -17,7 +26,7 @@ fn collect_all_railways() {
     // This particular reader requires that the map_op return the same type as the reduce_op - instead of a reduce function that
     // takes a previous value. This makes sense given the parallelization I think, but it mean that I make these intermediary, single
     // element vecs.
-    let railways = reader
+    let (railways, nodes) = reader
         .par_map_reduce(
             |element| match element {
                 Element::Way(way) => {
@@ -26,11 +35,7 @@ fn collect_all_railways() {
                         .any(|(key, value)| key == "railway" && value == "rail")
                     {
                         true => {
-                            let mut vec = Vec::new();
-
-                            let res = way.tags().find(|(key, _)| *key == "name");
-
-                            let way_name = match res {
+                            let way_name = match way.tags().find(|(key, _)| *key == "name") {
                                 Some(res) => res.1.to_string(),
                                 _ => way.id().to_string(),
                             };
@@ -38,31 +43,39 @@ fn collect_all_railways() {
                             let railway = OsmRailway {
                                 name: way_name,
                                 way_id: way.id(),
-                                nodes: Vec::new(),
+                                nodes: way.raw_refs().to_vec(),
                             };
 
-                            vec.push(railway);
-                            Some(vec)
+                            (Some(vec![railway]), None)
                         }
-                        false => None,
+                        false => (None, None),
                     }
                 }
-                _ => None,
+                Element::DenseNode(node) => (
+                    None,
+                    Some(vec![OsmNode {
+                        node_id: node.id(),
+                        latitude: node.lat(),
+                        longitude: node.lon(),
+                    }]),
+                ),
+                _ => (None, None),
             },
-            || None,
-            |a, b| match a {
-                None => match b {
-                    None => None,
-                    Some(b) => Some(b),
-                },
-                Some(mut a) => match b {
-                    None => Some(a),
-                    Some(b) => {
-                        // Combine them
-                        a.extend(b);
-                        Some(a)
-                    }
-                },
+            || (None, None),
+            |(mut a_railways, mut a_nodes), (mut b_railways, mut b_nodes)| {
+                // Get our rails and nodes from a
+                let mut r = a_railways.take().unwrap_or_else(Vec::new);
+                let mut n = a_nodes.take().unwrap_or_else(Vec::new);
+
+                if let Some(mut b_railways) = b_railways.take() {
+                    r.append(&mut b_railways);
+                }
+
+                if let Some(mut b_nodes) = b_nodes.take() {
+                    n.append(&mut b_nodes);
+                }
+
+                (Some(r), Some(n))
             },
         )
         .expect("Error loading OsmRailways");
@@ -72,6 +85,14 @@ fn collect_all_railways() {
         Some(r) => {
             let num_ways = r.len();
             println!("Number of railways {num_ways}");
+        }
+    }
+
+    match nodes {
+        None => println!("No nodes found"),
+        Some(r) => {
+            let num_nodes = r.len();
+            println!("Number of nodes {num_nodes}")
         }
     }
 }
@@ -105,6 +126,5 @@ fn count_all_railways() {
 }
 
 fn main() {
-    count_all_railways();
     collect_all_railways();
 }
