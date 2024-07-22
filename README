@@ -1,0 +1,1 @@
+`osm2rail` is very much a work in progress. Provided an `.osm.pbf` file, such as can be obtained from Geofabrik, it converts it into a meaningful representation for rail networks.

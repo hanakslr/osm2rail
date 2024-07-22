@@ -62,16 +62,16 @@ fn collect_all_railways() {
                 _ => (None, None),
             },
             || (None, None),
-            |(mut a_railways, mut a_nodes), (mut b_railways, mut b_nodes)| {
+            |(a_railways, a_nodes), (b_railways, b_nodes)| {
                 // Get our rails and nodes from a
-                let mut r = a_railways.take().unwrap_or_else(Vec::new);
-                let mut n = a_nodes.take().unwrap_or_else(Vec::new);
+                let mut r = a_railways.unwrap_or_else(Vec::new);
+                let mut n = a_nodes.unwrap_or_else(Vec::new);
 
-                if let Some(mut b_railways) = b_railways.take() {
+                if let Some(mut b_railways) = b_railways {
                     r.append(&mut b_railways);
                 }
 
-                if let Some(mut b_nodes) = b_nodes.take() {
+                if let Some(mut b_nodes) = b_nodes {
                     n.append(&mut b_nodes);
                 }
 
