@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use osmpbf::{Element, ElementReader};
 
 pub struct OsmRailway {
@@ -22,7 +24,7 @@ fn collect_all_railways() {
     let reader = ElementReader::from_path("./osm_data/us-northeast-latest.osm.pbf")
         .expect("Could not load data");
 
-    // Iterate ove every element, find the ways - create a Vec of OsmRailway.
+    // Iterate over every element, find the ways - create a Vec of OsmRailway.
     // This particular reader requires that the map_op return the same type as the reduce_op - instead of a reduce function that
     // takes a previous value. This makes sense given the parallelization I think, but it mean that I make these intermediary, single
     // element vecs.
@@ -64,18 +66,21 @@ fn collect_all_railways() {
             || (None, None),
             |(a_railways, a_nodes), (b_railways, b_nodes)| {
                 // Get our rails and nodes from a
-                let mut r = a_railways.unwrap_or_else(Vec::new);
-                let mut n = a_nodes.unwrap_or_else(Vec::new);
+                let railways = match (a_railways, b_railways) {
+                    (res @ Some(_), None) => res,
+                    (None, res @ Some(_)) => res,
+                    (Some(r1), Some(r2)) => Some(r1.into_iter().chain(r2).collect()),
+                    _ => None,
+                };
 
-                if let Some(mut b_railways) = b_railways {
-                    r.append(&mut b_railways);
-                }
+                let nodes = match (a_nodes, b_nodes) {
+                    (res @ Some(_), None) => res,
+                    (None, res @ Some(_)) => res,
+                    (Some(r1), Some(r2)) => Some(r1.into_iter().chain(r2).collect()),
+                    _ => None,
+                };
 
-                if let Some(mut b_nodes) = b_nodes {
-                    n.append(&mut b_nodes);
-                }
-
-                (Some(r), Some(n))
+                (railways, nodes)
             },
         )
         .expect("Error loading OsmRailways");
@@ -95,6 +100,36 @@ fn collect_all_railways() {
             println!("Number of nodes {num_nodes}")
         }
     }
+}
+
+/// Given a vec of OsmRailways, we want to reduce to a graph of railway segments that
+/// are broken up at interesections from other segments. That each segments start_node and end_node
+/// should either be a terminals or contain an intersection with another segment
+fn segment_railways(railways: Vec<OsmRailway>) -> Vec<OsmRailway> {
+    // Make a mapping of node_id to the OsmRailway and index that it is first seen at
+    // If a node_id already exists in the mapping - split that Railway into 2 segments, as well as the new one
+    let mut split_railways = Vec::new();
+    let previous_nodes = HashMap::<i64, (&OsmRailway, usize)>::new();
+
+    for railway in railways {
+        // iterate over the nodes - check to see if the node_id is in the hashmap
+        for (index, n) in railway.nodes.iter().enumerate() {
+            if previous_nodes.contains_key(n) {
+                // This node exists in another segment, which means we need to break up that segment AND
+                // this is the end of this segment.
+                //let new_slice = railway.nodes.split_off(index);
+                split_railways.push(OsmRailway {
+                    name: railway.name.clone(),
+                    way_id: railway.way_id,
+                    nodes: Vec::new(),
+                })
+            } else {
+                // We haven't seen this node before - add it to the mapping so we know that it has been used
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 fn count_all_railways() {
@@ -127,4 +162,34 @@ fn count_all_railways() {
 
 fn main() {
     collect_all_railways();
+}
+
+#[test]
+fn test_segment_railways() {
+    // Given a simple vec of railways, break it up
+    let railways = Vec::from([
+        OsmRailway {
+            name: "way 1".to_string(),
+            way_id: 1,
+            nodes: Vec::from([1, 2, 3, 6, 8, 9]),
+        },
+        OsmRailway {
+            name: "way 2".to_string(),
+            way_id: 2,
+            nodes: [2, 3].to_vec(),
+        },
+        OsmRailway {
+            name: "way 3".to_string(),
+            way_id: 3,
+            nodes: [4, 5, 6, 7].to_vec(),
+        },
+    ]);
+
+    let segmented_railways = segment_railways(railways);
+
+    assert_eq!(6, segmented_railways.len());
+
+    // Add a check for the nodes.
+    // Should have
+    // [1,2], [2,3], [2,6], [4,5,6], [6,7], [6,8,9]
 }
