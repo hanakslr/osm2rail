@@ -18,6 +18,7 @@ struct OsmNode {
     node_id: i64,
     latitude: f64,
     longitude: f64,
+    is_crossing: bool,
 }
 
 fn collect_all_railways() {
@@ -59,6 +60,10 @@ fn collect_all_railways() {
                         node_id: node.id(),
                         latitude: node.lat(),
                         longitude: node.lon(),
+                        is_crossing: node
+                            .tags()
+                            .find(|(k, v)| *k == "railway" && *v == "crossing")
+                            .is_some(),
                     }]),
                 ),
                 _ => (None, None),
@@ -66,21 +71,18 @@ fn collect_all_railways() {
             || (None, None),
             |(a_railways, a_nodes), (b_railways, b_nodes)| {
                 // Get our rails and nodes from a
-                let railways = match (a_railways, b_railways) {
-                    (res @ Some(_), None) => res,
-                    (None, res @ Some(_)) => res,
-                    (Some(r1), Some(r2)) => Some(r1.into_iter().chain(r2).collect()),
-                    _ => None,
-                };
+                let mut r = a_railways.unwrap_or_else(Vec::new);
+                let mut n = a_nodes.unwrap_or_else(Vec::new);
 
-                let nodes = match (a_nodes, b_nodes) {
-                    (res @ Some(_), None) => res,
-                    (None, res @ Some(_)) => res,
-                    (Some(r1), Some(r2)) => Some(r1.into_iter().chain(r2).collect()),
-                    _ => None,
-                };
+                if let Some(mut b_railways) = b_railways {
+                    r.append(&mut b_railways);
+                }
 
-                (railways, nodes)
+                if let Some(mut b_nodes) = b_nodes {
+                    n.append(&mut b_nodes);
+                }
+
+                (Some(r), Some(n))
             },
         )
         .expect("Error loading OsmRailways");
@@ -97,67 +99,56 @@ fn collect_all_railways() {
         None => println!("No nodes found"),
         Some(r) => {
             let num_nodes = r.len();
-            println!("Number of nodes {num_nodes}")
+            println!("Number of nodes {num_nodes}");
+
+            // Also print the number that are crossings
+            let num_crossings = r.iter().filter(|n| n.is_crossing).count();
+            println!("Number of crossings {num_crossings}")
         }
     }
 }
 
 /// Given a vec of OsmRailways, we want to reduce to a graph of railway segments that
-/// are broken up at interesections from other segments. That each segments start_node and end_node
-/// should either be a terminals or contain an intersection with another segment
-fn segment_railways(railways: Vec<OsmRailway>) -> Vec<OsmRailway> {
-    // Make a mapping of node_id to the OsmRailway and index that it is first seen at
-    // If a node_id already exists in the mapping - split that Railway into 2 segments, as well as the new one
-    let mut split_railways = Vec::new();
-    let previous_nodes = HashMap::<i64, (&OsmRailway, usize)>::new();
+/// are broken up at nodes that are deemed crossings.
+fn segment_railways_at_crossings(
+    railways: Vec<OsmRailway>,
+    nodes: Vec<OsmNode>,
+) -> Vec<OsmRailway> {
+    let mut crossing_node_mapping = HashMap::new();
 
-    for railway in railways {
-        // iterate over the nodes - check to see if the node_id is in the hashmap
-        for (index, n) in railway.nodes.iter().enumerate() {
-            if previous_nodes.contains_key(n) {
-                // This node exists in another segment, which means we need to break up that segment AND
-                // this is the end of this segment.
-                //let new_slice = railway.nodes.split_off(index);
-                split_railways.push(OsmRailway {
-                    name: railway.name.clone(),
-                    way_id: railway.way_id,
-                    nodes: Vec::new(),
-                })
-            } else {
-                // We haven't seen this node before - add it to the mapping so we know that it has been used
+    for n in nodes.iter().filter(|n| n.is_crossing) {
+        crossing_node_mapping.insert(n.node_id, n);
+    }
+
+    let mut unprocessed_railways = railways;
+    let mut segmented_railways = Vec::new();
+
+    while unprocessed_railways.len() > 0 {
+        let mut r = unprocessed_railways.pop().unwrap();
+        let way_id = r.way_id;
+        println!("Way id: {way_id}");
+
+        // Iterate over each node, and i
+        for (index, railway_node) in r.nodes.iter().enumerate() {
+            if crossing_node_mapping.contains_key(&railway_node) {
+                // Split up this railway - we are moving through the nodes sucessively, so we will split where we are, and
+                // make a new railway, being done with the current one.
+                let splice = r.nodes.split_off(index);
+
+                // Make a new railway -
+                unprocessed_railways.push(OsmRailway {
+                    name: r.name.clone(),
+                    way_id: r.way_id.clone(),
+                    nodes: splice,
+                });
+
+                segmented_railways.push(r);
+                break;
             }
         }
     }
 
-    Vec::new()
-}
-
-fn count_all_railways() {
-    // This file is downloaded from Geofabrik but is 1.5gb so it is not in source control
-    let reader = ElementReader::from_path("./osm_data/us-northeast-latest.osm.pbf")
-        .expect("Couldn't load data.");
-
-    // Count the railways
-    let ways = reader
-        .par_map_reduce(
-            |element| match element {
-                Element::Way(way) => {
-                    match way
-                        .tags()
-                        .any(|(key, value)| key == "railway" && value == "rail")
-                    {
-                        true => 1,
-                        _ => 0,
-                    }
-                }
-                _ => 0,
-            },
-            || 0_u64,     // Zero is the identity value for addition
-            |a, b| a + b, // Sum the partial results
-        )
-        .expect("Error counting.");
-
-    println!("Number of ways: {ways}");
+    segmented_railways
 }
 
 fn main() {
@@ -185,7 +176,19 @@ fn test_segment_railways() {
         },
     ]);
 
-    let segmented_railways = segment_railways(railways);
+    let mut nodes = Vec::new();
+    let crossings = [2, 6];
+
+    for i in 1..9 {
+        nodes.push(OsmNode {
+            node_id: i,
+            latitude: -44.00 + i as f64, // this is a dummy value
+            longitude: 77.0 + i as f64,  // this is a dummy value
+            is_crossing: crossings.contains(&i),
+        })
+    }
+
+    let segmented_railways = segment_railways_at_crossings(railways, nodes);
 
     assert_eq!(6, segmented_railways.len());
 
