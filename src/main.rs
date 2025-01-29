@@ -1,15 +1,16 @@
 use osmpbf::{Element, ElementReader};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
-trait ElementReaderExt {
+trait Filter {
     fn collect_filtered<T, F>(path: &str, filter_map: F) -> Result<Vec<T>, osmpbf::Error>
     where
         F: Fn(Element) -> Option<T> + Send + Sync,
         T: Send;
 }
 
-impl<R: Read + Send> ElementReaderExt for ElementReader<R> {
+impl<R: Read + Send> Filter for ElementReader<R> {
     fn collect_filtered<T, F>(path: &str, filter_map: F) -> Result<Vec<T>, osmpbf::Error>
     where
         F: Fn(Element) -> Option<T> + Send + Sync,
@@ -34,7 +35,7 @@ impl<R: Read + Send> ElementReaderExt for ElementReader<R> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OsmRailway {
     // Represent the railway from OSM - moderately untransformed, without any splitting done.
     name: String,
@@ -58,6 +59,7 @@ impl OsmRailway {
         }
     }
 
+    /// Helper function to get a count of the number of times nodes are used in a vec of `OsmRailway`s.
     pub fn get_used_node_counts(railways: &Vec<OsmRailway>) -> HashMap<i64, i64> {
         // Iterate over all of the railways and find make a hashap of nodes and the number
         // of times they are used.
@@ -72,11 +74,15 @@ impl OsmRailway {
         node_use_count
     }
 
+    /// Given a set of node_ids, split the railway at each of the node_ids returning a vec of
+    /// OsmRailways for each new segment.
     pub fn split_at_intersections(self, intersection_nodes: &HashSet<i64>) -> Vec<OsmRailway> {
-        // Take ownership of self, and if needed split it into multiple selfs on the used node ids.
-
-        // Iterate over our nodes - but we never want to split on the first index
+        // Keep track of the index as we iterate through the nodes. We never split on the
+        // first node or we end up with a segment of length 1 which is useless.
         let mut index = 0;
+
+        // Additionally, keep track of the last node in the previous split. We add it to the
+        // beginning of the next split so that we don't lose that edge.
         let mut previous_node = None;
         let split_railways: Vec<OsmRailway> = self
             .node_ids
@@ -86,15 +92,18 @@ impl OsmRailway {
                 should_split
             })
             .map(|nodes| {
-                // Our node splits are
-                let mut node_ids = nodes.to_owned();
-
                 // If there is a previous_node, add it at the beginning of the list
-                if let Some(previous_node) = previous_node {
-                    node_ids.insert(0, previous_node);
-                }
+                let node_ids: Vec<_> = if let Some(previous_node) = previous_node {
+                    let mut vec = Vec::with_capacity(nodes.len() + 1); // Reserve space for one more node
+                    vec.push(previous_node);
+                    vec.extend_from_slice(nodes); // Extend with nodes
+                    vec
+                } else {
+                    nodes.to_vec() // No previous_node, just copy the slice to Vec
+                };
 
-                previous_node = nodes.last().cloned();
+                previous_node = nodes.last().cloned(); // Clone last element for future use
+
                 OsmRailway {
                     name: self.name.clone(),
                     way_id: self.way_id,
@@ -190,7 +199,9 @@ fn main() {
 
     segment_railways(railways, intersections);
 
-    collect_nodes(node_counts.into_keys().collect());
+    // We only need to do this when we are ready to dump out our nodes
+    // for display on a map.
+    // collect_nodes(node_counts.into_keys().collect());
 
     {}
 }
