@@ -1,6 +1,38 @@
-use std::collections::{HashMap, HashSet};
-
 use osmpbf::{Element, ElementReader};
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
+
+trait ElementReaderExt {
+    fn collect_filtered<T, F>(path: &str, filter_map: F) -> Result<Vec<T>, osmpbf::Error>
+    where
+        F: Fn(Element) -> Option<T> + Send + Sync,
+        T: Send;
+}
+
+impl<R: Read + Send> ElementReaderExt for ElementReader<R> {
+    fn collect_filtered<T, F>(path: &str, filter_map: F) -> Result<Vec<T>, osmpbf::Error>
+    where
+        F: Fn(Element) -> Option<T> + Send + Sync,
+        T: Send,
+    {
+        let reader = ElementReader::from_path(path)?;
+        reader
+            .par_map_reduce(
+                |element| match filter_map(element) {
+                    Some(item) => Some(vec![item]),
+                    None => None,
+                },
+                || None,
+                |a, b| match (a, b) {
+                    (res @ Some(_), None) => res,
+                    (None, res @ Some(_)) => res,
+                    (Some(r1), Some(r2)) => Some(r1.into_iter().chain(r2).collect()),
+                    _ => None,
+                },
+            )
+            .map(|opt| opt.unwrap_or_default())
+    }
+}
 
 #[derive(Debug)]
 pub struct OsmRailway {
@@ -13,7 +45,7 @@ pub struct OsmRailway {
 }
 
 impl OsmRailway {
-    pub fn from_osm_way(way: osmpbf::Way) -> OsmRailway {
+    pub fn from_osm_way(way: &osmpbf::Way) -> OsmRailway {
         let way_name = match way.tags().find(|(key, _)| *key == "name") {
             Some(res) => res.1.to_string(),
             _ => way.id().to_string(),
@@ -84,63 +116,51 @@ struct OsmNode {
     longitude: f64,
 }
 
+impl OsmNode {
+    pub fn from_osm_dense_node(node: osmpbf::DenseNode) -> OsmNode {
+        OsmNode {
+            node_id: node.id(),
+            latitude: node.lat(),
+            longitude: node.lon(),
+        }
+    }
+}
+
 fn collect_nodes(node_ids: Vec<i64>) -> Vec<OsmNode> {
-    todo!()
+    let nodes = ElementReader::<std::fs::File>::collect_filtered(
+        "./osm_data/us-latest.osm.pbf",
+        |element| match element {
+            Element::DenseNode(node) if node_ids.contains(&node.id()) => {
+                Some(OsmNode::from_osm_dense_node(node))
+            }
+            _ => None,
+        },
+    )
+    .expect("Error collecting filtered elements");
+
+    let num_nodes = nodes.len();
+    println!("Number of nodes: {num_nodes}");
+
+    nodes
 }
 
 /// Read an OSM file and parse out all of the railways.
 fn collect_all_railways() -> Vec<OsmRailway> {
-    let reader =
-        ElementReader::from_path("./osm_data/us-latest.osm.pbf").expect("Could not load data");
+    let railways = ElementReader::<std::fs::File>::collect_filtered(
+        "./osm_data/us-latest.osm.pbf",
+        |element| match element {
+            Element::Way(way) if way.tags().any(|(k, v)| k == "railway" && v == "rail") => {
+                Some(OsmRailway::from_osm_way(&way))
+            }
+            _ => None,
+        },
+    )
+    .expect("Error collecting filtered elements");
 
-    // Iterate over every element, find the ways - create a Vec of OsmRailway.
-    // This particular reader requires that the map_op return the same type as the reduce_op - instead of a reduce function that
-    // takes a previous value. This makes sense given the parallelization I think, but it mean that I make these intermediary, single
-    // element vecs.
-    let railways = reader
-        .par_map_reduce(
-            |element| match element {
-                Element::Way(way) => {
-                    match way
-                        .tags()
-                        .any(|(key, value)| key == "railway" && value == "rail")
-                    {
-                        true => {
-                            let way_name = match way.tags().find(|(key, _)| *key == "name") {
-                                Some(res) => res.1.to_string(),
-                                _ => way.id().to_string(),
-                            };
+    let num_ways = railways.len();
+    println!("Number of railways {num_ways}");
 
-                            Some(vec![OsmRailway {
-                                name: way_name,
-                                way_id: way.id(),
-                                node_ids: way.raw_refs().to_owned(),
-                            }])
-                        }
-                        false => None,
-                    }
-                }
-                _ => None,
-            },
-            || None,
-            |a_railways, b_railways| match (a_railways, b_railways) {
-                (res @ Some(_), None) => res,
-                (None, res @ Some(_)) => res,
-                (Some(r1), Some(r2)) => Some(r1.into_iter().chain(r2).collect()),
-                _ => None,
-            },
-        )
-        .expect("Error loading OsmRailways");
-
-    match railways {
-        None => println!("None found"),
-        Some(ref r) => {
-            let num_ways = r.len();
-            println!("Number of railways {num_ways}");
-        }
-    }
-
-    railways.unwrap_or(Vec::new())
+    railways
 }
 
 /// Given a vec of OsmRailways, break at the nodes that are seen in other railways.
@@ -158,34 +178,6 @@ fn segment_railways(railways: Vec<OsmRailway>, intersectons: HashSet<i64>) -> Ve
     segmented_railways
 }
 
-fn count_all_railways() {
-    // This file is downloaded from Geofabrik but is 1.5gb so it is not in source control
-    let reader =
-        ElementReader::from_path("./osm_data/us-latest.osm.pbf").expect("Couldn't load data.");
-
-    // Count the railways
-    let ways = reader
-        .par_map_reduce(
-            |element| match element {
-                Element::Way(way) => {
-                    match way
-                        .tags()
-                        .any(|(key, value)| key == "railway" && value == "rail")
-                    {
-                        true => 1,
-                        _ => 0,
-                    }
-                }
-                _ => 0,
-            },
-            || 0_u64,     // Zero is the identity value for addition
-            |a, b| a + b, // Sum the partial results
-        )
-        .expect("Error counting.");
-
-    println!("Number of ways: {ways}");
-}
-
 fn main() {
     let railways = collect_all_railways();
     let node_counts = OsmRailway::get_used_node_counts(&railways);
@@ -198,7 +190,7 @@ fn main() {
 
     segment_railways(railways, intersections);
 
-    let nodes = collect_nodes(node_counts.into_keys().collect());
+    collect_nodes(node_counts.into_keys().collect());
 
     {}
 }
