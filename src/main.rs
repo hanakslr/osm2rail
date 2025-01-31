@@ -1,8 +1,9 @@
 use osmpbf::{Element, ElementReader};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::io::Read;
+
+const FILE_NAME: &str = "./osm_data/us-northeast-latest.osm.pbf";
 
 trait Filter {
     fn collect_filtered<T, F>(path: &str, filter_map: F) -> Result<Vec<T>, osmpbf::Error>
@@ -146,59 +147,48 @@ impl OsmRailway {
     }
 }
 
-struct OsmNode {
-    // Represents a single OsmNode. Keyed by node_id - these ids correspond to the values of OsmRailway.nodes.
-    // Our library can exapnd the Way out into lat/longs directly, but it will be more efficient to split Railways into
-    // segments based on intersecting node_id than lat/long.
-    node_id: i64,
-    latitude: f64,
-    longitude: f64,
-}
-
-impl OsmNode {
-    pub fn from_osm_dense_node(node: osmpbf::DenseNode) -> OsmNode {
-        OsmNode {
-            node_id: node.id(),
-            latitude: node.lat(),
-            longitude: node.lon(),
-        }
-    }
-}
-
 fn collect_nodes(node_ids: Vec<i64>) -> HashMap<i64, LatLong> {
-    let reader = ElementReader::from_path("./osm_data/us-latest.osm.pbf").unwrap();
+    let reader = ElementReader::from_path(FILE_NAME).unwrap();
 
-    let mut flattened_node_map = HashMap::new();
+    let node_coords =
+        reader
+            .par_map_reduce(
+                |element| match element {
+                    Element::DenseNode(node) if node_ids.contains(&node.id()) => Some(
+                        HashMap::from([(node.id(), LatLong(node.lat(), node.lon()))]),
+                    ),
+                    _ => None,
+                },
+                || None,
+                |a, b| match (a, b) {
+                    (res @ Some(_), None) => res,
+                    (None, res @ Some(_)) => res,
+                    (Some(mut map1), Some(map2)) => {
+                        map1.extend(map2);
+                        Some(map1)
+                    }
+                    _ => None,
+                },
+            )
+            .expect("Error parsing nodes.")
+            .expect("No nodes found.");
 
-    reader
-        .for_each(|element| {
-            if let Element::DenseNode(node) = element {
-                if node_ids.contains(&node.id()) {
-                    flattened_node_map.insert(node.id(), LatLong(node.lat(), node.lon()));
-                }
-            }
-        })
-        .unwrap();
-
-    let count = flattened_node_map.len();
-
+    let count = node_coords.len();
     println!("Number of nodes {count}");
 
-    flattened_node_map
+    node_coords
 }
 
 /// Read an OSM file and parse out all of the railways.
 fn collect_all_railways() -> Vec<OsmRailway> {
-    let railways = ElementReader::<std::fs::File>::collect_filtered(
-        "./osm_data/us-latest.osm.pbf",
-        |element| match element {
+    let railways =
+        ElementReader::<std::fs::File>::collect_filtered(FILE_NAME, |element| match element {
             Element::Way(way) if way.tags().any(|(k, v)| k == "railway" && v == "rail") => {
                 Some(OsmRailway::from_osm_way(&way))
             }
             _ => None,
-        },
-    )
-    .expect("Error collecting filtered elements");
+        })
+        .expect("Error collecting filtered elements");
 
     let num_ways = railways.len();
     println!("Number of railways {num_ways}");
@@ -212,11 +202,10 @@ fn segment_railways(railways: Vec<OsmRailway>) -> Vec<RailwaySegment> {
     let intersections = node_counts
         .iter()
         .filter(|(_, count)| **count > 1)
-        .map(|(node_id, _)| *node_id) // Extract keys
+        .map(|(node_id, _)| *node_id)
         .collect();
 
-    // let node_coords = collect_nodes(node_counts.into_keys().collect());
-    let node_coords = HashMap::new();
+    let node_coords = collect_nodes(node_counts.into_keys().collect());
 
     let railway_segments: Vec<RailwaySegment> = railways
         .into_iter()
