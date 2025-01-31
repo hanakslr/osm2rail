@@ -1,6 +1,7 @@
 use osmpbf::{Element, ElementReader};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::io::Read;
 
 trait Filter {
@@ -45,6 +46,76 @@ pub struct OsmRailway {
     node_ids: Vec<i64>, // A list of the node_ids that make up this way.
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RailwaySegment {
+    name: String,
+    way_id: i64,
+    node_ids: Vec<i64>,
+    path: Vec<LatLong>,
+}
+
+impl RailwaySegment {
+    /// Consume the railway and make a railway segment that is split at intersections
+    /// and populates the path and the distance
+    pub fn from_osm_railway(
+        railway: OsmRailway,
+        intersections: &HashSet<i64>,
+        node_coords: &HashMap<i64, LatLong>,
+    ) -> Vec<RailwaySegment> {
+        // Keep track of the index as we iterate through the nodes. We never split on the
+        // first node or we end up with a segment of length 1 which is useless.
+        let mut index = 0;
+
+        // Additionally, keep track of the last node in the previous split. We add it to the
+        // beginning of the next split so that we don't lose that edge.
+        let mut previous_node = None;
+        let railway_segments: Vec<RailwaySegment> = railway
+            .node_ids
+            .split_inclusive(|n| {
+                let should_split = index != 0 && intersections.contains(n);
+                index += 1;
+                should_split
+            })
+            .map(|nodes| {
+                // If there is a previous_node, add it at the beginning of the list
+                let node_ids: Vec<_> = if let Some(previous_node) = previous_node {
+                    let mut vec = Vec::with_capacity(nodes.len() + 1); // Reserve space for one more node
+                    vec.push(previous_node);
+                    vec.extend_from_slice(nodes); // Extend with nodes
+                    vec
+                } else {
+                    nodes.to_vec() // No previous_node, just copy the slice to Vec
+                };
+
+                let path = node_ids
+                    .iter()
+                    .map(|&id| {
+                        node_coords
+                            .get(&id)
+                            .or(Some(&LatLong(0.0, 0.0)))
+                            .expect(&format!("Could not find lat long for {id}"))
+                            .clone()
+                    })
+                    .collect();
+
+                previous_node = nodes.last().cloned(); // Clone last element for future use
+
+                RailwaySegment {
+                    name: railway.name.clone(),
+                    way_id: railway.way_id,
+                    node_ids,
+                    path,
+                }
+            })
+            .collect();
+
+        railway_segments
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LatLong(f64, f64);
+
 impl OsmRailway {
     pub fn from_osm_way(way: &osmpbf::Way) -> OsmRailway {
         let way_name = match way.tags().find(|(key, _)| *key == "name") {
@@ -73,47 +144,6 @@ impl OsmRailway {
 
         node_use_count
     }
-
-    /// Given a set of node_ids, split the railway at each of the node_ids returning a vec of
-    /// OsmRailways for each new segment.
-    pub fn split_at_intersections(self, intersection_nodes: &HashSet<i64>) -> Vec<OsmRailway> {
-        // Keep track of the index as we iterate through the nodes. We never split on the
-        // first node or we end up with a segment of length 1 which is useless.
-        let mut index = 0;
-
-        // Additionally, keep track of the last node in the previous split. We add it to the
-        // beginning of the next split so that we don't lose that edge.
-        let mut previous_node = None;
-        let split_railways: Vec<OsmRailway> = self
-            .node_ids
-            .split_inclusive(|n| {
-                let should_split = index != 0 && intersection_nodes.contains(n);
-                index += 1;
-                should_split
-            })
-            .map(|nodes| {
-                // If there is a previous_node, add it at the beginning of the list
-                let node_ids: Vec<_> = if let Some(previous_node) = previous_node {
-                    let mut vec = Vec::with_capacity(nodes.len() + 1); // Reserve space for one more node
-                    vec.push(previous_node);
-                    vec.extend_from_slice(nodes); // Extend with nodes
-                    vec
-                } else {
-                    nodes.to_vec() // No previous_node, just copy the slice to Vec
-                };
-
-                previous_node = nodes.last().cloned(); // Clone last element for future use
-
-                OsmRailway {
-                    name: self.name.clone(),
-                    way_id: self.way_id,
-                    node_ids,
-                }
-            })
-            .collect();
-
-        split_railways
-    }
 }
 
 struct OsmNode {
@@ -135,22 +165,26 @@ impl OsmNode {
     }
 }
 
-fn collect_nodes(node_ids: Vec<i64>) -> Vec<OsmNode> {
-    let nodes = ElementReader::<std::fs::File>::collect_filtered(
-        "./osm_data/us-latest.osm.pbf",
-        |element| match element {
-            Element::DenseNode(node) if node_ids.contains(&node.id()) => {
-                Some(OsmNode::from_osm_dense_node(node))
+fn collect_nodes(node_ids: Vec<i64>) -> HashMap<i64, LatLong> {
+    let reader = ElementReader::from_path("./osm_data/us-latest.osm.pbf").unwrap();
+
+    let mut flattened_node_map = HashMap::new();
+
+    reader
+        .for_each(|element| {
+            if let Element::DenseNode(node) = element {
+                if node_ids.contains(&node.id()) {
+                    flattened_node_map.insert(node.id(), LatLong(node.lat(), node.lon()));
+                }
             }
-            _ => None,
-        },
-    )
-    .expect("Error collecting filtered elements");
+        })
+        .unwrap();
 
-    let num_nodes = nodes.len();
-    println!("Number of nodes: {num_nodes}");
+    let count = flattened_node_map.len();
 
-    nodes
+    println!("Number of nodes {count}");
+
+    flattened_node_map
 }
 
 /// Read an OSM file and parse out all of the railways.
@@ -172,23 +206,7 @@ fn collect_all_railways() -> Vec<OsmRailway> {
     railways
 }
 
-/// Given a vec of OsmRailways, break at the nodes that are seen in other railways.
-/// Return a vec of OsmRailways that are appropriately segmented, and a HashSet of the used
-/// node ids.
-fn segment_railways(railways: Vec<OsmRailway>, intersectons: HashSet<i64>) -> Vec<OsmRailway> {
-    let segmented_railways: Vec<OsmRailway> = railways
-        .into_iter()
-        .flat_map(|railway| railway.split_at_intersections(&intersectons))
-        .collect();
-
-    let num_segmented_railways = segmented_railways.len();
-    println!("Number of segmented railways: {num_segmented_railways}");
-
-    segmented_railways
-}
-
-fn main() {
-    let railways = collect_all_railways();
+fn segment_railways(railways: Vec<OsmRailway>) -> Vec<RailwaySegment> {
     let node_counts = OsmRailway::get_used_node_counts(&railways);
 
     let intersections = node_counts
@@ -197,13 +215,24 @@ fn main() {
         .map(|(node_id, _)| *node_id) // Extract keys
         .collect();
 
-    segment_railways(railways, intersections);
+    // let node_coords = collect_nodes(node_counts.into_keys().collect());
+    let node_coords = HashMap::new();
 
-    // We only need to do this when we are ready to dump out our nodes
-    // for display on a map.
-    // collect_nodes(node_counts.into_keys().collect());
+    let railway_segments: Vec<RailwaySegment> = railways
+        .into_iter()
+        .flat_map(|railway| RailwaySegment::from_osm_railway(railway, &intersections, &node_coords))
+        .collect();
 
-    {}
+    let num_segments = railway_segments.len();
+
+    println!("Number of segments {num_segments}");
+
+    railway_segments
+}
+
+fn main() {
+    let railways = collect_all_railways();
+    segment_railways(railways);
 }
 
 #[test]
@@ -227,15 +256,7 @@ fn test_segment_railways() {
         },
     ]);
 
-    let node_counts = OsmRailway::get_used_node_counts(&railways);
-
-    let intersections = node_counts
-        .iter()
-        .filter(|(_, count)| **count > 1)
-        .map(|(node_id, _)| *node_id) // Extract keys
-        .collect();
-
-    let segmented_railways = segment_railways(railways, intersections);
+    let segmented_railways = segment_railways(railways);
 
     assert_eq!(7, segmented_railways.len(), "{:?}", segmented_railways);
 }
