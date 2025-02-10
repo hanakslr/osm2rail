@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 osmpbf = "0.3.3"
+serde = {version = "1.0", features = ["derive"]}
