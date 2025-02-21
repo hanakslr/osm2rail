@@ -5,6 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 mod reader;
 
+pub trait HasTags {
+    fn tags(&self) -> &HashMap<String, String>;
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OsmRailway {
     // Represent the railway from OSM - moderately untransformed, without any splitting done.
@@ -21,6 +25,7 @@ pub struct OsmRailway {
 pub struct OsmNode {
     pub lat: f64,
     pub lon: f64,
+    pub tags: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,6 +112,18 @@ impl OsmRailway {
     }
 }
 
+impl HasTags for OsmRailway {
+    fn tags(&self) -> &HashMap<String, String> {
+        &self.tags
+    }
+}
+
+impl HasTags for OsmNode {
+    fn tags(&self) -> &HashMap<String, String> {
+        &self.tags
+    }
+}
+
 /// Read an OSM file and parse out all of the railways.
 pub fn collect_all_railways(file: &str) -> Vec<OsmRailway> {
     let railways =
@@ -135,6 +152,13 @@ pub fn collect_nodes(file: &str) -> HashMap<i64, OsmNode> {
                     OsmNode {
                         lat: node.lat(),
                         lon: node.lon(),
+                        tags: node.tags().fold(
+                            HashMap::<String, String>::new(),
+                            |mut acc, (k, v)| {
+                                acc.insert(k.to_string(), v.to_string());
+                                acc
+                            },
+                        ),
                     },
                 )])),
                 _ => None,
