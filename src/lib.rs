@@ -1,5 +1,6 @@
 use crate::reader::Filter;
-use osmpbf::{Element, ElementReader};
+use geo::{Distance, Haversine, Point};
+use osmpbf::{Element, ElementReader, WayNodeLocation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -35,6 +36,36 @@ pub struct RailwaySegment {
     pub node_ids: Vec<i64>,
 }
 
+impl RailwaySegment {
+    /// Given the railway segment and a mapping of the node ids to their locations
+    /// calculate the distance of the segment in kilometers.
+    pub fn get_distance(&self, node_locations: &HashMap<i64, OsmNode>) -> f64 {
+        let mut found_count = 0;
+        let mut not_found_count = 0;
+        let ls: Vec<Point> = self
+            .node_ids
+            .iter()
+            .filter_map(|node_id| match node_locations.get(node_id) {
+                Some(n) => {
+                    found_count += 1;
+                    Some(Point::new(n.lon, n.lat))
+                }
+                None => {
+                    not_found_count += 1;
+                    None
+                }
+            })
+            .collect();
+
+        ls.iter()
+            .zip(ls.iter().skip(1))
+            .fold(0.0, |dist, (pt_a, pt_b)| {
+                let seg_dist = Haversine::distance(*pt_a, *pt_b);
+                dist + seg_dist
+            })
+    }
+}
+
 impl OsmRailway {
     pub fn from_osm_way(way: &osmpbf::Way) -> OsmRailway {
         let way_name = match way.tags().find(|(key, _)| *key == "name") {
@@ -49,10 +80,22 @@ impl OsmRailway {
                 acc
             });
 
+        // Our refs are *deltas* - this means if we actually want the node ids, we need to iterate
+        // over and add the delta to the previous number and that is our node id.
+        let mut node_id = 0;
+        let node_ids = way
+            .raw_refs()
+            .iter()
+            .map(|n| {
+                node_id += n;
+                node_id
+            })
+            .collect();
+
         OsmRailway {
             name: way_name,
             way_id: way.id(),
-            node_ids: way.raw_refs().to_owned(),
+            node_ids: node_ids,
             tags: tag_map,
         }
     }
@@ -165,13 +208,12 @@ pub fn collect_nodes(file: &str) -> HashMap<i64, OsmNode> {
             },
             || None,
             |a, b| match (a, b) {
-                (res @ Some(_), None) => res,
-                (None, res @ Some(_)) => res,
+                (None, None) => None,
+                (res @ Some(_), None) | (None, res @ Some(_)) => res,
                 (Some(mut map1), Some(map2)) => {
                     map1.extend(map2);
                     Some(map1)
                 }
-                _ => None,
             },
         )
         .expect("Error parsing nodes.")
