@@ -82,13 +82,12 @@ impl OsmRailway {
 
         // Our refs are *deltas* - this means if we actually want the node ids, we need to iterate
         // over and add the delta to the previous number and that is our node id.
-        let mut node_id = 0;
         let node_ids = way
             .raw_refs()
             .iter()
-            .map(|n| {
-                node_id += n;
-                node_id
+            .scan(0_i64, |acc, n| {
+                *acc += n;
+                Some(*acc)
             })
             .collect();
 
