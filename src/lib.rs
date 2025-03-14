@@ -1,6 +1,6 @@
 use crate::reader::Filter;
 use geo::{Distance, Haversine, Point};
-use osmpbf::{Element, ElementReader, WayNodeLocation};
+use osmpbf::{Element, ElementReader};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
